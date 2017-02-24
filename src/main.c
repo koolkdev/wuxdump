@@ -72,8 +72,9 @@ void println(int line, const char *msg)
 	}
 }
 
-#define SECTOR_SIZE 2048
-#define NUM_SECTORS 1024
+#define SECTOR_SIZE 0x8000
+#define SECTORS_COUNT 0xBA740
+#define NUM_SECTORS 64
 
 int fsa_odd_read(int fsa_fd, int fd, void *buf, int offset)
 {
@@ -96,7 +97,7 @@ int fsa_write(int fsa_fd, int fd, void *buf, int len)
 	return done;
 }
 
-static const char *hdrStr = "wudump v1.5 by FIX94";
+static const char *hdrStr = "wudump v1.5 by FIX94 (wux mode)";
 void printhdr_noflip()
 {
 	println_noflip(0,hdrStr);
@@ -132,15 +133,15 @@ static unsigned int (*zlib_crc32)(unsigned int crc32, const void *buf, int bufsi
 
 static const int bufSize = SECTOR_SIZE*NUM_SECTORS;
 static void *sectorBuf = NULL;
-static bool threadRunning = true;
+//static bool threadRunning = true;
 static unsigned int crc32Val = 0;
 static md5_context md5ctx;
 static sha1_context sha1ctx;
-static unsigned int crc32PartVal = 0;
-static md5_context md5PartCtx;
-static sha1_context sha1PartCtx;
+//static unsigned int crc32PartVal = 0;
+//static md5_context md5PartCtx;
+//static sha1_context sha1PartCtx;
 
-static int hashThread(s32 argc, void *args)
+/*static int hashThread(s32 argc, void *args)
 {
 	(void)argc;
 	(void)args;
@@ -158,7 +159,32 @@ static int hashThread(s32 argc, void *args)
 		OSSuspendThread(OSGetCurrentThread());
 	}
 	return 0;
+}*/
+
+unsigned int swap_uint32( unsigned int val )
+{
+    val = ((val << 8) & 0xFF00FF00 ) | ((val >> 8) & 0xFF00FF ); 
+    return (val << 16) | (val >> 16);
 }
+
+unsigned long long swap_uint64( unsigned long long val )
+{
+    val = ((val << 8) & 0xFF00FF00FF00FF00ULL ) | ((val >> 8) & 0x00FF00FF00FF00FFULL );
+    val = ((val << 16) & 0xFFFF0000FFFF0000ULL ) | ((val >> 16) & 0x0000FFFF0000FFFFULL );
+    return (val << 32) | (val >> 32);
+}
+
+typedef struct 
+{
+	unsigned int		magic0;
+	unsigned int		magic1;
+	unsigned int		sectorSize;
+	unsigned long long	uncompressedSize;
+	unsigned int		flags;
+}wuxHeader_t;
+
+#define WUX_MAGIC_0	'WUX0'
+#define WUX_MAGIC_1	swap_uint32(0x1099d02e)
 
 int Menu_Main(void)
 {
@@ -356,8 +382,9 @@ int Menu_Main(void)
 
 	sprintf(discStr, "Dumping %s...", discId);
 	char progress[64];
+	char progress2[64];
 	bool newF = true;
-	int part = 0;
+	int part = 1;
 	unsigned int readSectors = 0;
 
 	//full hashes
@@ -366,67 +393,117 @@ int Menu_Main(void)
 	sha1_starts(&sha1ctx);
 
 	//part hashes
-	crc32PartVal = 0;
-	md5_starts(&md5PartCtx);
-	sha1_starts(&sha1PartCtx);
+	//crc32PartVal = 0;
+	//md5_starts(&md5PartCtx);
+	//sha1_starts(&sha1PartCtx);
+
+	unsigned int* sectorIndexTable = (unsigned int*)MEMBucket_alloc(sizeof(unsigned int) * SECTORS_COUNT, 0x100);
+	unsigned char* sectorHashArray = (unsigned char*)MEMBucket_alloc(sizeof(unsigned char) * 0x10 * SECTORS_COUNT, 0x100);
+
+	unsigned int uniqueSectorCount = 0;
+	long long compressedSize = 0;
 
 	//create hashing thread
-	void *stack = MEMBucket_alloc(0x4000, 0x20);
-	void *thread = memalign(8, 0x1000); //thread cant be in MEMBucket
-	OSCreateThread(thread, hashThread, 0, NULL, (unsigned int)stack+0x4000, 0x4000, 20, (1<<OSGetCoreId()));
+	//void *stack = MEMBucket_alloc(0x4000, 0x20);
+	//void *thread = memalign(8, 0x1000); //thread cant be in MEMBucket
+	//OSCreateThread(thread, hashThread, 0, NULL, (unsigned int)stack+0x4000, 0x4000, 20, (1<<OSGetCoreId()));
 
 	//0xBA7400 = full disc
-	while(readSectors < 0xBA7400)
+	while(readSectors < SECTORS_COUNT)
 	{
-		if(newF)
-		{
-			if(f != NULL)
-			{
-				//close file
-				fclose(f);
-				f = NULL;
-				//write in file hashes
-				char tmpChar[64];
-				sprintf(tmpChar, "game_part%i", part);
-				write_hash_file(tmpChar, wudumpPath, crc32PartVal, 
-					&md5PartCtx, &sha1PartCtx);
-				//open new hashes
-				crc32PartVal = 0;
-				md5_starts(&md5PartCtx);
-				sha1_starts(&sha1PartCtx);
-			}
-			//set part int for next file
-			part++;
-			sprintf(wudPath, "%s/game_part%i.wud", wudumpPath, part);
-			f = fopen(wudPath, "wb");
-			if(f == NULL)
-				break;
-			newF = false;
-		}
 		//read offsets until no error returns
 		do {
 			ret = fsa_odd_read(fsaFd, oddFd, sectorBuf, readSectors);
 		} while(ret < 0);
+		//update global hashes
+		crc32Val = zlib_crc32(crc32Val, sectorBuf, bufSize);
+		md5_update(&md5ctx, sectorBuf, bufSize);
+		sha1_update(&sha1ctx, sectorBuf, bufSize);
+
 		//update hashes in thread
-		OSResumeThread(thread);
-		//write in new offsets
-		fwrite(sectorBuf, 1, bufSize, f);
+		//OSResumeThread(thread);
+		for(unsigned int i=0; i<NUM_SECTORS; i++)
+		{
+			if(newF)
+			{
+				if(f != NULL)
+				{
+					//close file
+					fclose(f);
+					f = NULL;
+					//write in file hashes
+					//char tmpChar[64];
+					//sprintf(tmpChar, "game_part%i", part);
+					//write_hash_file(tmpChar, wudumpPath, crc32PartVal, 
+					//	&md5PartCtx, &sha1PartCtx);
+					//open new hashes
+					//crc32PartVal = 0;
+					//md5_starts(&md5PartCtx);
+					//sha1_starts(&sha1PartCtx);
+				}
+				//set part int for next file
+				part++;
+				sprintf(wudPath, "%s/game_part%i.wux", wudumpPath, part);
+				f = fopen(wudPath, "wb");
+				if(f == NULL)
+					break;
+				newF = false;
+			}
+			md5_context md5ctxsec;
+			md5_starts(&md5ctxsec);
+			md5_update(&md5ctxsec, ((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE);
+			unsigned int md5[4];
+			md5_finish(&md5ctxsec, (unsigned char*)md5);
+			//update hashes for part file
+			//crc32PartVal = zlib_crc32(crc32PartVal, ((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE);
+			//md5_update(&md5PartCtx, ((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE);
+			//sha1_update(&sha1PartCtx, ((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE);
+
+			unsigned int sectorReuseIndex = 0xFFFFFFFF;
+			// try to locate any previous sector with same hash
+			for(unsigned int j=0; j<uniqueSectorCount; j++)
+			{
+				if( memcmp(md5, sectorHashArray+j*sizeof(md5), sizeof(md5)) == 0 )
+				{
+					sectorReuseIndex = j;
+					break;
+				}
+			}
+			// if we found a sector then just store the index
+			if( sectorReuseIndex != 0xFFFFFFFF )
+			{
+				sectorIndexTable[readSectors+i] = swap_uint32(sectorReuseIndex);
+				if((uniqueSectorCount % 0x10000) == 0)
+					newF = true; //new file every 2gb
+				continue;
+			}
+			// else store the sector and append a new index
+			fwrite(((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE, 1, f);
+			memcpy(sectorHashArray+uniqueSectorCount*sizeof(md5), md5, sizeof(md5));
+			compressedSize += SECTOR_SIZE;
+			sectorIndexTable[readSectors+i] = swap_uint32(uniqueSectorCount);
+			uniqueSectorCount++;
+			if((uniqueSectorCount % 0x10000) == 0)
+				newF = true; //new file every 2gb
+		}
+		
 		readSectors += NUM_SECTORS;
-		if((readSectors % 0x100000) == 0)
-			newF = true; //new file every 2gb
-		if((readSectors % 0x2000) == 0)
+		if((readSectors % 0x200) == 0)
 		{
 			OSScreenClearBufferEx(0, 0);
 			OSScreenClearBufferEx(1, 0);
-			sprintf(progress,"0x%06X/0xBA7400 (%i%%)",readSectors,(readSectors*100)/0xBA7400);
+			sprintf(progress,"0x%05X/0x%05X (%i%%)",readSectors,SECTORS_COUNT,(readSectors*100)/SECTORS_COUNT);
+			int compressionRatio = (int)(((long long)readSectors * SECTOR_SIZE)*10 / compressedSize);
+			sprintf(progress2,"Compression ratio: 1:%d.%d", compressionRatio/10, compressionRatio%10);
 			printhdr_noflip();
 			println_noflip(2,discStr);
 			println_noflip(3,progress);
+			println_noflip(4,progress2);
 			OSScreenFlipBuffersEx(0);
 			OSScreenFlipBuffersEx(1);
 		}
 		//wait for hashes to get done
-		while(!OSIsThreadSuspended(thread)) ;
+		//while(!OSIsThreadSuspended(thread)) ;
 	}
 
 	//write last part hash
@@ -436,36 +513,72 @@ int Menu_Main(void)
 		fclose(f);
 		f = NULL;
 		//write in file hashes
-		char tmpChar[64];
-		sprintf(tmpChar, "game_part%i", part);
-		write_hash_file(tmpChar, wudumpPath, crc32PartVal, &md5PartCtx, &sha1PartCtx);
+		//char tmpChar[64];
+		//sprintf(tmpChar, "game_part%i", part);
+		//write_hash_file(tmpChar, wudumpPath, crc32PartVal, &md5PartCtx, &sha1PartCtx);
 	}
+
+	//open new hashes
+	//crc32PartVal = 0;
+	//md5_starts(&md5PartCtx);
+	//sha1_starts(&sha1PartCtx);
+
+	sprintf(wudPath, "%s/game_part1.wux", wudumpPath);
+	f = fopen(wudPath, "wb");
+
+	// write header
+	wuxHeader_t wuxHeader = {0};
+	wuxHeader.magic0 = WUX_MAGIC_0;
+	wuxHeader.magic1 = WUX_MAGIC_1;
+	wuxHeader.sectorSize = swap_uint32(SECTOR_SIZE);
+	wuxHeader.uncompressedSize = swap_uint64((unsigned long long)SECTORS_COUNT * SECTOR_SIZE);
+	wuxHeader.flags = 0;
+	fwrite(&wuxHeader, sizeof(wuxHeader_t), 1, f);
+	//crc32PartVal = zlib_crc32(crc32PartVal, &wuxHeader, sizeof(wuxHeader_t));
+	//md5_update(&md5PartCtx, &wuxHeader, sizeof(wuxHeader_t));
+	//sha1_update(&sha1PartCtx, &wuxHeader, sizeof(wuxHeader_t));
+	fwrite(sectorIndexTable, SECTORS_COUNT, sizeof(unsigned int), f);
+	//crc32PartVal = zlib_crc32(crc32PartVal, sectorIndexTable, SECTORS_COUNT*sizeof(unsigned int));
+	//md5_update(&md5PartCtx, sectorIndexTable, SECTORS_COUNT*sizeof(unsigned int));
+	//sha1_update(&sha1PartCtx, sectorIndexTable, SECTORS_COUNT*sizeof(unsigned int));
+	int offset = ftell(f);
+	// align to SECTOR_SIZE
+	offset = (offset + SECTOR_SIZE - 1);
+	offset = offset - (offset%SECTOR_SIZE);
+	fseek(f, offset-1, SEEK_SET);
+	fputc('\0', f);
+	fclose(f);
+	f=NULL;
+	//write_hash_file("game_part1", wudumpPath, crc32PartVal, &md5PartCtx, &sha1PartCtx);
 
 	//write global hashes into file
 	write_hash_file("game", wudumpPath, crc32Val, &md5ctx, &sha1ctx);
 
 	//close down hash thread
-	threadRunning = false;
-	OSResumeThread(thread);
-	OSJoinThread(thread, &ret);
-	free(thread); //thread cant be in MEMBucket
-	MEMBucket_free(stack);
+	//threadRunning = false;
+	//OSResumeThread(thread);
+	//OSJoinThread(thread, &ret);
+	//free(thread); //thread cant be in MEMBucket
+	//MEMBucket_free(stack);
 
 	//all finished!
 	OSScreenClearBufferEx(0, 0);
 	OSScreenClearBufferEx(1, 0);
-	sprintf(progress,"0x%06X/0xBA7400 (%i%%)",readSectors,(readSectors*100)/0xBA7400);
+	sprintf(progress,"0x%06X/0x%06X (%i%%)",readSectors,(readSectors*100)/SECTORS_COUNT, SECTORS_COUNT);
+	int compressionRatio = (int)(((long long)readSectors * SECTOR_SIZE)*10 / compressedSize);
+	sprintf(progress2,"Compression ratio: 1:%d.%d", compressionRatio/10, compressionRatio%10);
 	printhdr_noflip();
 	println_noflip(2,discStr);
 	println_noflip(3,progress);
-	if(readSectors == 0xBA7400)
-		println_noflip(4,"Disc dumped!");
+	println_noflip(4,progress2);
+	if(readSectors == SECTORS_COUNT)
+		println_noflip(5,"Disc dumped!");
 	else //only error we handle while dumping
-		println_noflip(4,"Failed to write Disc WUD!");
+		println_noflip(5,"Failed to write Disc WUD!");
 	if(apd_enabled)
 	{
 		if(IMEnableAPD() == 0)
-			println_noflip(5, "Re-Enabled Auto Power-Down.");
+			println_noflip(6, "Re-Enabled Auto Power-Down.");
 	}
 	OSScreenFlipBuffersEx(0);
 	OSScreenFlipBuffersEx(1);
