@@ -186,16 +186,6 @@ typedef struct
 #define WUX_MAGIC_0	'WUX0'
 #define WUX_MAGIC_1	swap_uint32(0x1099d02e)
 
-unsigned int simple_hash( unsigned char * data, unsigned int length )
-{
-	unsigned int hash = 0x7f231;
-	for (unsigned int i=0; i < length; ++i) {
-		hash += 0x58af3 * data[i] + 0x31643;
-		hash *= 0xe9177;
-	}
-	return hash & 0xfffff;
-}
-
 int Menu_Main(void)
 {
 	InitOSFunctionPointers();
@@ -470,7 +460,7 @@ int Menu_Main(void)
 			//md5_update(&md5PartCtx, ((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE);
 			//sha1_update(&sha1PartCtx, ((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE);
 
-			unsigned int* current_pos = &sectorHashTable[simple_hash(md5, sizeof(md5))];
+			unsigned int* current_pos = &sectorHashTable[md5[0]&0xfffff];
 			while (*current_pos != 0xFFFFFFFF) {
 				unsigned int * next_pos = sectorHashArray + (*current_pos)*(sizeof(md5) + sizeof(unsigned long));
 				if( memcmp(md5, next_pos+1, sizeof(md5)) == 0 )
