@@ -186,6 +186,16 @@ typedef struct
 #define WUX_MAGIC_0	'WUX0'
 #define WUX_MAGIC_1	swap_uint32(0x1099d02e)
 
+unsigned int simple_hash( unsigned char * data, unsigned int length )
+{
+	unsigned int hash = 0x7f231;
+	for (unsigned int i=0; i < length; ++i) {
+		hash += 0x58af3 * data[i] + 0x31643;
+		hash *= 0xe9177;
+	}
+	return hash & 0xfffff;
+}
+
 int Menu_Main(void)
 {
 	InitOSFunctionPointers();
@@ -398,8 +408,9 @@ int Menu_Main(void)
 	//sha1_starts(&sha1PartCtx);
 
 	unsigned int* sectorIndexTable = (unsigned int*)MEMBucket_alloc(sizeof(unsigned int) * SECTORS_COUNT, 0x100);
-	unsigned char* sectorHashArray = (unsigned char*)MEMBucket_alloc(sizeof(unsigned char) * 0x10 * SECTORS_COUNT, 0x100);
-
+	unsigned char* sectorHashArray = (unsigned char*)MEMBucket_alloc((sizeof(unsigned int) + (sizeof(unsigned char) * 0x10)) * SECTORS_COUNT, 0x100);
+	unsigned int* sectorHashTable = (unsigned char*)MEMBucket_alloc(sizeof(unsigned int) * 0x100000, 0x100);
+	memset(sectorHashTable, 0xff, sizeof(unsigned int) * 0x100000);
 	unsigned int uniqueSectorCount = 0;
 	long long compressedSize = 0;
 
@@ -459,27 +470,24 @@ int Menu_Main(void)
 			//md5_update(&md5PartCtx, ((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE);
 			//sha1_update(&sha1PartCtx, ((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE);
 
-			unsigned int sectorReuseIndex = 0xFFFFFFFF;
-			// try to locate any previous sector with same hash
-			for(unsigned int j=0; j<uniqueSectorCount; j++)
-			{
-				if( memcmp(md5, sectorHashArray+j*sizeof(md5), sizeof(md5)) == 0 )
-				{
-					sectorReuseIndex = j;
+			unsigned int* current_pos = &sectorHashTable[simple_hash(md5, sizeof(md5))];
+			while (*current_pos != 0xFFFFFFFF) {
+				unsigned int * next_pos = sectorHashArray + (*current_pos)*(sizeof(md5) + sizeof(unsigned long));
+				if( memcmp(md5, next_pos+1, sizeof(md5)) == 0 )
 					break;
-				}
+				current_pos = next_pos;
 			}
 			// if we found a sector then just store the index
-			if( sectorReuseIndex != 0xFFFFFFFF )
+			if( *current_pos != 0xFFFFFFFF )
 			{
-				sectorIndexTable[readSectors+i] = swap_uint32(sectorReuseIndex);
-				if((uniqueSectorCount % 0x10000) == 0)
-					newF = true; //new file every 2gb
+				sectorIndexTable[readSectors+i] = swap_uint32(*current_pos);
 				continue;
 			}
 			// else store the sector and append a new index
 			fwrite(((char*)sectorBuf)+i*SECTOR_SIZE, SECTOR_SIZE, 1, f);
-			memcpy(sectorHashArray+uniqueSectorCount*sizeof(md5), md5, sizeof(md5));
+			memset(sectorHashArray+uniqueSectorCount*(sizeof(md5)+sizeof(unsigned long)), 0xff, sizeof(unsigned long));
+			memcpy(sectorHashArray+uniqueSectorCount*(sizeof(md5)+sizeof(unsigned long))+sizeof(unsigned long), md5, sizeof(md5));
+			*current_pos = uniqueSectorCount;
 			compressedSize += SECTOR_SIZE;
 			sectorIndexTable[readSectors+i] = swap_uint32(uniqueSectorCount);
 			uniqueSectorCount++;
@@ -564,7 +572,7 @@ int Menu_Main(void)
 	//all finished!
 	OSScreenClearBufferEx(0, 0);
 	OSScreenClearBufferEx(1, 0);
-	sprintf(progress,"0x%06X/0x%06X (%i%%)",readSectors,(readSectors*100)/SECTORS_COUNT, SECTORS_COUNT);
+	sprintf(progress,"0x%05X/0x%05X (%i%%)",readSectors,SECTORS_COUNT,(readSectors*100)/SECTORS_COUNT);
 	int compressionRatio = (int)(((long long)readSectors * SECTOR_SIZE)*10 / compressedSize);
 	sprintf(progress2,"Compression ratio: 1:%d.%d", compressionRatio/10, compressionRatio%10);
 	printhdr_noflip();
